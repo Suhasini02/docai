@@ -1,0 +1,5 @@
+train: /Users/suhasini.chunduri/Documents/doc ai ocrmain/label studiomain/images # path to the training images folder
+val:   /Users/suhasini.chunduri/Documents/doc ai ocrmain/label studiomain/images   # path to the validation images folder 
+
+nc: 2  # number of classes
+names: [ 'from_address','to_address']  # list of class names
