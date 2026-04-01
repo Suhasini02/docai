@@ -76,7 +76,7 @@ jobs:
           payload = {
             "jsonrpc": "2.0",
             "id": f"pr-{os.environ['PR_NUMBER']}-review",
-            "method": "tasks/send",
+            "method": "message/send",
             "params": {
               "id": f"pr-{os.environ['PR_NUMBER']}-review",
               "message": {
