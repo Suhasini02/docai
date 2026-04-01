@@ -2,6 +2,7 @@ name: A2A Agent Code Review
 
 on:
   pull_request:
+    # Trigger on any PR to any branch
     types: [opened, synchronize, reopened]
 
 jobs:
@@ -17,48 +18,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Prepare and Send to A2A Agent
-        id: a2a_call
+      - name: Trigger Agent Review
+        id: trigger_agent
         run: |
-          # 1. Get the diff
+          # 1. Fetch the target branch to ensure we can compare
           git fetch origin ${{ github.base_ref }}
+
+          # 2. Generate the diff between the PR and the target branch
           git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
 
-          # 2. Build the exact JSON structure from your screenshot
-          # We add 'role', 'kind', and a 'messageId'
+          # 3. Create the EXACT payload your Agent's Pydantic model expects
+          # Note: We use 'pr_id' as indicated in your error message
           jq -n \
-            --arg title "${{ github.event.pull_request.title }}" \
-            --arg url "${{ github.event.pull_request.html_url }}" \
+            --arg method "review_pr" \
+            --arg repo "${{ github.repository }}" \
+            --arg pr_id "${{ github.event.pull_request.number }}" \
             --rawfile diff pr_diff.txt \
-            --arg msgid "$(uuidgen)" \
             '{
-              "role": "user",
-              "parts": [
-                {
-                  "kind": "text",
-                  "text": "Review this PR.\nTitle: \($title)\nURL: \($url)\n\nDiff:\n\($diff)"
-                }
-              ],
-              "messageId": $msgid
+              "method": $method,
+              "repo": $repo,
+              "pr_id": $pr_id,
+              "diff": $diff
             }' > payload.json
 
-          # 3. POST to Agent
-          curl -s -X POST "https://form-agent-890362666088.us-central1.run.app/a2a/app" \
+          # 4. Log the payload for debugging (Optional, but helpful)
+          echo "Sending the following JSON to the Agent:"
+          cat payload.json
+
+          # 5. Send the POST request
+          # Using -i to see the HTTP headers in the response log
+          curl -i -X POST "https://form-agent-890362666088.us-central1.run.app/a2a/app" \
             -H "Content-Type: application/json" \
-            -d @payload.json > response.json
-
-          # 4. Extract the response (Looking for parts[0].text based on screenshot)
-          AGENT_FEEDBACK=$(jq -r '.parts[0].text // "Agent did not return text."' response.json)
-          
-          # 5. Save to GitHub Output
-          echo "feedback<<EOF" >> $GITHUB_OUTPUT
-          echo "$AGENT_FEEDBACK" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Post Agent Comment
-        uses: mshick/add-pr-comment@v2
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          message: |
-            ##  AI Code Review
-            ${{ steps.a2a_call.outputs.feedback }}
+            -d @payload.json
