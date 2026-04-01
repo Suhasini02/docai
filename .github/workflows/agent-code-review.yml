@@ -1,7 +1,7 @@
 name: Agent MR Review
 on:
   pull_request:
-    types: [opened, synchronize]
+
 
 jobs:
   agent_job:
@@ -11,27 +11,3 @@ jobs:
       id-token: write      # Required for Cloud Run Auth
     
     steps:
-      - name: Call Agent
-        id: call_agent
-        run: |
-          # 1. Call your Cloud Run Agent
-          # We pass the PR number so the agent knows which code to look at
-          RESPONSE=$(curl -s -X POST "https://form-agent-890362666088.us-central1.run.app/a2a/app" \
-            -H "Content-Type: application/json" \
-            -d "{\"pr_id\": \"${{ github.event.pull_request.number }}\", \"repo\": \"${{ github.repository }}\"}")
-          
-          # Clean up response for multiline strings
-          echo "agent_out<<EOF" >> $GITHUB_OUTPUT
-          echo "$RESPONSE" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Post Comment
-        uses: actions/github-script@v6
-        with:
-          script: |
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `🤖 **Agent Feedback:**\n\n${{ steps.call_agent.outputs.agent_out }}`
-            })
