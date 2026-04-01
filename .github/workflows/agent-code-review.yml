@@ -2,14 +2,14 @@ name: A2A Agent Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened]
 
 jobs:
   agent-review:
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
-      contents: read
+      pull-requests: write # Explicitly allows commenting
+      contents: read       # Allows checking out code
 
     steps:
       - name: Checkout Code
@@ -20,43 +20,29 @@ jobs:
       - name: Prepare and Send to A2A Agent
         id: a2a_call
         run: |
-          # 1. Capture PR details
+          # Same logic as before
           PR_TITLE="${{ github.event.pull_request.title }}"
           PR_URL="${{ github.event.pull_request.html_url }}"
-          DIFF=$(git diff origin/${{ github.base_ref }} HEAD)
+          git diff origin/${{ github.base_ref }} HEAD > pr_diff.txt
 
-          # 2. Construct the A2A Protocol Payload
-          # We wrap the code/repo info in a "text" part for the agent to process
-          PAYLOAD=$(jq -n \
-            --arg title "$PR_TITLE" \
-            --arg url "$PR_URL" \
-            --arg diff "$DIFF" \
-            '{
-              "parts": [
-                {
-                  "text": "Review this Pull Request.\nRepo: \($url)\nTitle: \($title)\n\nCode Changes:\n\($diff)"
-                }
-              ]
-            }')
+          jq -n --arg t "$PR_TITLE" --arg u "$PR_URL" --rawfile d pr_diff.txt \
+            '{"parts": [{"text": "Review PR: \($t)\nURL: \($u)\n\nDiff:\n\($d)"}]}' > payload.json
 
-          # 3. POST to your Cloud Run Agent
           RESPONSE=$(curl -s -X POST "https://form-agent-890362666088.us-central1.run.app/a2a/app" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
+            -H "Content-Type: application/json" -d @payload.json)
 
-          # 4. Extract agent's response text (A2A usually returns parts[].text)
-          AGENT_FEEDBACK=$(echo $RESPONSE | jq -r '.parts[0].text // "Agent failed to provide a text response."')
+          AGENT_FEEDBACK=$(echo "$RESPONSE" | jq -r '.parts[0].text // "No feedback received."')
           
-          # Clean up for GitHub output (handling multi-line)
-          {
-            echo "feedback<<EOF"
-            echo "$AGENT_FEEDBACK"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
+          # Multiline output handling
+          echo "feedback<<EOF" >> $GITHUB_OUTPUT
+          echo "$AGENT_FEEDBACK" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Post Agent Comment
         uses: mshick/add-pr-comment@v2
         with:
+          # Explicitly pass the token to ensure the action has rights
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
           message: |
-            ## 🤖 AI Code Review
+            ##  AI Code Review
             ${{ steps.a2a_call.outputs.feedback }}
