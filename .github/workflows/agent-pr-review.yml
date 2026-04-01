@@ -19,22 +19,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      # ── 1. Collect PR metadata ──────────────────────────────────────────────
+      # ── 1. Collect PR metadata + diff ───────────────────────────────────────
       - name: Gather PR info
         id: pr_info
         env:
           BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
-          # Get the diff (capped at 8000 chars to stay within agent limits)
           DIFF=$(git diff origin/${BASE_BRANCH}...HEAD -- | head -c 8000)
-
-          # Escape for JSON — replace special characters
-          DIFF_ESCAPED=$(echo "$DIFF" | python3 -c "
-          import sys, json
-          print(json.dumps(sys.stdin.read()))
-          ")
-
+          DIFF_ESCAPED=$(echo "$DIFF" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read()))")
           echo "diff_escaped=$DIFF_ESCAPED" >> $GITHUB_OUTPUT
 
       # ── 2. Call your A2A agent ───────────────────────────────────────────────
@@ -51,58 +44,59 @@ jobs:
           REPO: ${{ github.repository }}
           DIFF_ESCAPED: ${{ steps.pr_info.outputs.diff_escaped }}
         run: |
-          # Build A2A-compliant JSON payload
-          PAYLOAD=$(python3 -c "
-          import json, os
+          PAYLOAD=$(python3 << 'PYEOF'
+          import json, os, uuid
 
           diff = json.loads(os.environ['DIFF_ESCAPED'])
 
-          message = f\"\"\"Please review this pull request and provide feedback.
+          message_text = (
+            "Please review this pull request and provide feedback.\n\n"
+            "## PR Details\n"
+            f"- **Repository**: {os.environ['REPO']}\n"
+            f"- **PR Number**: #{os.environ['PR_NUMBER']}\n"
+            f"- **Title**: {os.environ['PR_TITLE']}\n"
+            f"- **Author**: @{os.environ['PR_AUTHOR']}\n"
+            f"- **Branch**: `{os.environ['HEAD_BRANCH']}` -> `{os.environ['BASE_BRANCH']}`\n\n"
+            "## Description\n"
+            f"{os.environ.get('PR_BODY') or '_No description provided._'}\n\n"
+            "## Diff\n"
+            "```diff\n"
+            f"{diff[:6000]}\n"
+            "```\n\n"
+            "Please provide:\n"
+            "1. A summary of what this PR does\n"
+            "2. Potential issues or concerns\n"
+            "3. Suggestions for improvement\n"
+            "4. An overall assessment (Approve / Request Changes / Neutral)"
+          )
 
-          ## PR Details
-          - **Repository**: {os.environ['REPO']}
-          - **PR Number**: #{os.environ['PR_NUMBER']}
-          - **Title**: {os.environ['PR_TITLE']}
-          - **Author**: @{os.environ['PR_AUTHOR']}
-          - **Branch**: \`{os.environ['HEAD_BRANCH']}\` → \`{os.environ['BASE_BRANCH']}\`
-
-          ## Description
-          {os.environ.get('PR_BODY') or '_No description provided._'}
-
-          ## Diff
-          \`\`\`diff
-          {diff[:6000]}
-          \`\`\`
-
-          Please provide:
-          1. A summary of what this PR does
-          2. Potential issues or concerns
-          3. Suggestions for improvement
-          4. An overall assessment (Approve / Request Changes / Neutral)
-          \"\"\"
-
+          # ✅ Exact A2A format confirmed from Postman screenshot:
+          #    - parts use 'kind': 'text'  (NOT 'type')
+          #    - messageId is required (UUID)
           payload = {
-            'jsonrpc': '2.0',
-            'id': f\"pr-{os.environ['PR_NUMBER']}-review\",
-            'method': 'tasks/send',
-            'params': {
-              'id': f\"pr-{os.environ['PR_NUMBER']}-review\",
-              'message': {
-                'role': 'user',
-                'parts': [
+            "jsonrpc": "2.0",
+            "id": f"pr-{os.environ['PR_NUMBER']}-review",
+            "method": "tasks/send",
+            "params": {
+              "id": f"pr-{os.environ['PR_NUMBER']}-review",
+              "message": {
+                "role": "user",
+                "parts": [
                   {
-                    'type': 'text',
-                    'text': message
+                    "kind": "text",
+                    "text": message_text
                   }
-                ]
+                ],
+                "messageId": str(uuid.uuid4())
               }
             }
           }
 
           print(json.dumps(payload))
-          ")
+          PYEOF
+          )
 
-          echo "Calling agent at: $AGENT_URL"
+          echo "Calling agent..."
 
           RESPONSE=$(curl -s -X POST "$AGENT_URL" \
             -H "Content-Type: application/json" \
@@ -111,56 +105,51 @@ jobs:
 
           echo "Raw response: $RESPONSE"
 
-          # Extract the agent's reply text from A2A response
-          AGENT_REPLY=$(echo "$RESPONSE" | python3 -c "
+          # ✅ Parse using confirmed response structure (screenshot lines 47-57):
+          #    result.parts[] where kind == "text" and role == "agent"
+          AGENT_REPLY=$(echo "$RESPONSE" | python3 << 'PYEOF'
           import sys, json
 
           try:
             data = json.load(sys.stdin)
-
-            # A2A response structure: result.artifacts[0].parts[0].text
-            # or result.status.message.parts[0].text
             reply = None
+            result = data.get("result", {})
 
-            result = data.get('result', {})
+            # Primary path: result.parts[] (confirmed in screenshot)
+            for part in result.get("parts", []):
+              if part.get("kind") == "text":
+                reply = part.get("text", "")
+                break
 
-            # Try artifacts first
-            artifacts = result.get('artifacts', [])
-            if artifacts:
-              parts = artifacts[0].get('parts', [])
-              if parts:
-                reply = parts[0].get('text', '')
-
-            # Fallback: status message
+            # Fallback 1: result.status.message.parts[]
             if not reply:
-              status = result.get('status', {})
-              msg = status.get('message', {})
-              parts = msg.get('parts', [])
-              if parts:
-                reply = parts[0].get('text', '')
+              for part in result.get("status", {}).get("message", {}).get("parts", []):
+                if part.get("kind") == "text":
+                  reply = part.get("text", "")
+                  break
 
-            # Fallback: direct content array (non-A2A)
+            # Fallback 2: result.artifacts[].parts[]
             if not reply:
-              content = data.get('content', [])
-              for block in content:
-                if block.get('type') == 'text':
-                  reply = block.get('text', '')
+              for artifact in result.get("artifacts", []):
+                for part in artifact.get("parts", []):
+                  if part.get("kind") == "text":
+                    reply = part.get("text", "")
+                    break
+                if reply:
                   break
 
             if reply:
-              print(reply)
+              print(reply.strip())
             else:
-              print('Agent responded but no text content was found in the response.')
-              print('Raw response:', json.dumps(data, indent=2))
+              print("_Agent responded but no text could be extracted._\n\nRaw response:\n```json\n" + json.dumps(data, indent=2)[:3000] + "\n```")
 
           except Exception as e:
-            print(f'Failed to parse agent response: {e}')
-            print('Raw:', sys.stdin.read() if not data else json.dumps(data))
-          ")
+            print(f"_Failed to parse agent response: {e}_")
+          PYEOF
+          )
 
-          # Save reply to file (avoids env var length limits)
           echo "$AGENT_REPLY" > /tmp/agent_reply.txt
-          echo "Agent reply saved."
+          echo "Reply saved."
 
       # ── 3. Post agent reply as PR comment ───────────────────────────────────
       - name: Post comment on PR
@@ -176,7 +165,7 @@ jobs:
               agentReply,
               '',
               '---',
-              `*Triggered by commit \`${context.sha.substring(0, 7)}\` on \`${{ github.event.pull_request.head.ref }}\`*`
+              `*Triggered by commit \`${context.sha.substring(0, 7)}\` · Branch: \`${{ github.event.pull_request.head.ref }}\` → \`main\`*`
             ].join('\n');
 
             await github.rest.issues.createComment({
