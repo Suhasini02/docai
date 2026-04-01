@@ -30,7 +30,7 @@ jobs:
           DIFF_ESCAPED=$(echo "$DIFF" | python3 -c "import sys, json; print(json.dumps(sys.stdin.read()))")
           echo "diff_escaped=$DIFF_ESCAPED" >> $GITHUB_OUTPUT
 
-      # ── 2. Call your A2A agent ───────────────────────────────────────────────
+      # ── 2. Build payload & call agent ────────────────────────────────────────
       - name: Call A2A Agent
         id: agent_call
         env:
@@ -44,7 +44,8 @@ jobs:
           REPO: ${{ github.repository }}
           DIFF_ESCAPED: ${{ steps.pr_info.outputs.diff_escaped }}
         run: |
-          PAYLOAD=$(python3 << 'PYEOF'
+          # Write Python script to a file to avoid heredoc shell-quoting issues
+          cat > /tmp/build_payload.py << 'PYEOF'
           import json, os, uuid
 
           diff = json.loads(os.environ['DIFF_ESCAPED'])
@@ -52,17 +53,15 @@ jobs:
           message_text = (
             "Please review this pull request and provide feedback.\n\n"
             "## PR Details\n"
-            f"- **Repository**: {os.environ['REPO']}\n"
-            f"- **PR Number**: #{os.environ['PR_NUMBER']}\n"
-            f"- **Title**: {os.environ['PR_TITLE']}\n"
-            f"- **Author**: @{os.environ['PR_AUTHOR']}\n"
-            f"- **Branch**: `{os.environ['HEAD_BRANCH']}` -> `{os.environ['BASE_BRANCH']}`\n\n"
+            "- **Repository**: " + os.environ['REPO'] + "\n"
+            "- **PR Number**: #" + os.environ['PR_NUMBER'] + "\n"
+            "- **Title**: " + os.environ['PR_TITLE'] + "\n"
+            "- **Author**: @" + os.environ['PR_AUTHOR'] + "\n"
+            "- **Branch**: `" + os.environ['HEAD_BRANCH'] + "` -> `" + os.environ['BASE_BRANCH'] + "`\n\n"
             "## Description\n"
-            f"{os.environ.get('PR_BODY') or '_No description provided._'}\n\n"
-            "## Diff\n"
-            "```diff\n"
-            f"{diff[:6000]}\n"
-            "```\n\n"
+            + (os.environ.get('PR_BODY') or '_No description provided._') + "\n\n"
+            "## Diff\n```diff\n"
+            + diff[:6000] + "\n```\n\n"
             "Please provide:\n"
             "1. A summary of what this PR does\n"
             "2. Potential issues or concerns\n"
@@ -70,15 +69,11 @@ jobs:
             "4. An overall assessment (Approve / Request Changes / Neutral)"
           )
 
-          # ✅ Exact A2A format confirmed from Postman screenshot:
-          #    - parts use 'kind': 'text'  (NOT 'type')
-          #    - messageId is required (UUID)
           payload = {
             "jsonrpc": "2.0",
-            "id": f"pr-{os.environ['PR_NUMBER']}-review",
+            "id": "pr-" + os.environ['PR_NUMBER'] + "-review",
             "method": "message/send",
             "params": {
-              "id": f"pr-{os.environ['PR_NUMBER']}-review",
               "message": {
                 "role": "user",
                 "parts": [
@@ -94,62 +89,79 @@ jobs:
 
           print(json.dumps(payload))
           PYEOF
-          )
 
-          echo "Calling agent..."
+          PAYLOAD=$(python3 /tmp/build_payload.py)
+          echo "Payload built. Calling agent..."
 
           RESPONSE=$(curl -s -X POST "$AGENT_URL" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD" \
             --max-time 120)
 
-          echo "Raw response: $RESPONSE"
+          echo "Raw response received (length: ${#RESPONSE})"
 
-          # ✅ Parse using confirmed response structure (screenshot lines 47-57):
-          #    result.parts[] where kind == "text" and role == "agent"
-          AGENT_REPLY=$(echo "$RESPONSE" | python3 << 'PYEOF'
+          # Write Python parser to a file (avoids heredoc pipe issues)
+          cat > /tmp/parse_response.py << 'PYEOF'
           import sys, json
 
-          try:
-            data = json.load(sys.stdin)
-            reply = None
-            result = data.get("result", {})
+          raw = sys.stdin.read().strip()
+          if not raw:
+            print("_Agent returned an empty response._")
+            sys.exit(0)
 
-            # Primary path: result.parts[] (confirmed in screenshot)
+          try:
+            data = json.loads(raw)
+          except Exception as e:
+            print(f"_Could not parse JSON response: {e}_\n\nRaw:\n```\n{raw[:2000]}\n```")
+            sys.exit(0)
+
+          reply = None
+          result = data.get("result", {})
+
+          # Path 1: result.artifacts[0].parts[]  ← confirmed in your raw response log
+          for artifact in result.get("artifacts", []):
+            for part in artifact.get("parts", []):
+              if part.get("kind") == "text":
+                reply = part.get("text", "")
+                break
+            if reply:
+              break
+
+          # Path 2: result.parts[]
+          if not reply:
             for part in result.get("parts", []):
               if part.get("kind") == "text":
                 reply = part.get("text", "")
                 break
 
-            # Fallback 1: result.status.message.parts[]
-            if not reply:
-              for part in result.get("status", {}).get("message", {}).get("parts", []):
-                if part.get("kind") == "text":
-                  reply = part.get("text", "")
-                  break
+          # Path 3: result.status.message.parts[]
+          if not reply:
+            for part in result.get("status", {}).get("message", {}).get("parts", []):
+              if part.get("kind") == "text":
+                reply = part.get("text", "")
+                break
 
-            # Fallback 2: result.artifacts[].parts[]
-            if not reply:
-              for artifact in result.get("artifacts", []):
-                for part in artifact.get("parts", []):
+          # Path 4: result.history — last message with role == "agent"
+          if not reply:
+            for msg in reversed(result.get("history", [])):
+              if msg.get("role") == "agent":
+                for part in msg.get("parts", []):
                   if part.get("kind") == "text":
                     reply = part.get("text", "")
                     break
-                if reply:
-                  break
+              if reply:
+                break
 
-            if reply:
-              print(reply.strip())
-            else:
-              print("_Agent responded but no text could be extracted._\n\nRaw response:\n```json\n" + json.dumps(data, indent=2)[:3000] + "\n```")
-
-          except Exception as e:
-            print(f"_Failed to parse agent response: {e}_")
+          if reply:
+            print(reply.strip())
+          else:
+            print("_Agent responded but no text could be extracted._\n\nRaw response:\n```json\n" + json.dumps(data, indent=2)[:3000] + "\n```")
           PYEOF
-          )
 
-          echo "$AGENT_REPLY" > /tmp/agent_reply.txt
-          echo "Reply saved."
+          # Pipe response directly into the parser script (no heredoc)
+          echo "$RESPONSE" | python3 /tmp/parse_response.py > /tmp/agent_reply.txt
+          echo "Reply saved. Preview:"
+          head -5 /tmp/agent_reply.txt
 
       # ── 3. Post agent reply as PR comment ───────────────────────────────────
       - name: Post comment on PR
