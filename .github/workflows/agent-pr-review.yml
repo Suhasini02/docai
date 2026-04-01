@@ -1,0 +1,189 @@
+name: Agent PR Review
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  agent-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── 1. Collect PR metadata ──────────────────────────────────────────────
+      - name: Gather PR info
+        id: pr_info
+        env:
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Get the diff (capped at 8000 chars to stay within agent limits)
+          DIFF=$(git diff origin/${BASE_BRANCH}...HEAD -- | head -c 8000)
+
+          # Escape for JSON — replace special characters
+          DIFF_ESCAPED=$(echo "$DIFF" | python3 -c "
+          import sys, json
+          print(json.dumps(sys.stdin.read()))
+          ")
+
+          echo "diff_escaped=$DIFF_ESCAPED" >> $GITHUB_OUTPUT
+
+      # ── 2. Call your A2A agent ───────────────────────────────────────────────
+      - name: Call A2A Agent
+        id: agent_call
+        env:
+          AGENT_URL: ${{ secrets.AGENT_URL }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          DIFF_ESCAPED: ${{ steps.pr_info.outputs.diff_escaped }}
+        run: |
+          # Build A2A-compliant JSON payload
+          PAYLOAD=$(python3 -c "
+          import json, os
+
+          diff = json.loads(os.environ['DIFF_ESCAPED'])
+
+          message = f\"\"\"Please review this pull request and provide feedback.
+
+          ## PR Details
+          - **Repository**: {os.environ['REPO']}
+          - **PR Number**: #{os.environ['PR_NUMBER']}
+          - **Title**: {os.environ['PR_TITLE']}
+          - **Author**: @{os.environ['PR_AUTHOR']}
+          - **Branch**: \`{os.environ['HEAD_BRANCH']}\` → \`{os.environ['BASE_BRANCH']}\`
+
+          ## Description
+          {os.environ.get('PR_BODY') or '_No description provided._'}
+
+          ## Diff
+          \`\`\`diff
+          {diff[:6000]}
+          \`\`\`
+
+          Please provide:
+          1. A summary of what this PR does
+          2. Potential issues or concerns
+          3. Suggestions for improvement
+          4. An overall assessment (Approve / Request Changes / Neutral)
+          \"\"\"
+
+          payload = {
+            'jsonrpc': '2.0',
+            'id': f\"pr-{os.environ['PR_NUMBER']}-review\",
+            'method': 'tasks/send',
+            'params': {
+              'id': f\"pr-{os.environ['PR_NUMBER']}-review\",
+              'message': {
+                'role': 'user',
+                'parts': [
+                  {
+                    'type': 'text',
+                    'text': message
+                  }
+                ]
+              }
+            }
+          }
+
+          print(json.dumps(payload))
+          ")
+
+          echo "Calling agent at: $AGENT_URL"
+
+          RESPONSE=$(curl -s -X POST "$AGENT_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            --max-time 120)
+
+          echo "Raw response: $RESPONSE"
+
+          # Extract the agent's reply text from A2A response
+          AGENT_REPLY=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+
+          try:
+            data = json.load(sys.stdin)
+
+            # A2A response structure: result.artifacts[0].parts[0].text
+            # or result.status.message.parts[0].text
+            reply = None
+
+            result = data.get('result', {})
+
+            # Try artifacts first
+            artifacts = result.get('artifacts', [])
+            if artifacts:
+              parts = artifacts[0].get('parts', [])
+              if parts:
+                reply = parts[0].get('text', '')
+
+            # Fallback: status message
+            if not reply:
+              status = result.get('status', {})
+              msg = status.get('message', {})
+              parts = msg.get('parts', [])
+              if parts:
+                reply = parts[0].get('text', '')
+
+            # Fallback: direct content array (non-A2A)
+            if not reply:
+              content = data.get('content', [])
+              for block in content:
+                if block.get('type') == 'text':
+                  reply = block.get('text', '')
+                  break
+
+            if reply:
+              print(reply)
+            else:
+              print('Agent responded but no text content was found in the response.')
+              print('Raw response:', json.dumps(data, indent=2))
+
+          except Exception as e:
+            print(f'Failed to parse agent response: {e}')
+            print('Raw:', sys.stdin.read() if not data else json.dumps(data))
+          ")
+
+          # Save reply to file (avoids env var length limits)
+          echo "$AGENT_REPLY" > /tmp/agent_reply.txt
+          echo "Agent reply saved."
+
+      # ── 3. Post agent reply as PR comment ───────────────────────────────────
+      - name: Post comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const agentReply = fs.readFileSync('/tmp/agent_reply.txt', 'utf8').trim();
+
+            const body = [
+              '## 🤖 Agent Review',
+              '',
+              agentReply,
+              '',
+              '---',
+              `*Triggered by commit \`${context.sha.substring(0, 7)}\` on \`${{ github.event.pull_request.head.ref }}\`*`
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body
+            });
+
+            console.log('Comment posted successfully.');
