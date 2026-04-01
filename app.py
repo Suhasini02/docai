@@ -46,3 +46,4 @@ if uploaded_file:
 
     else:
         st.error("Failed to upload the image. Please try again.")
+#app.py file
