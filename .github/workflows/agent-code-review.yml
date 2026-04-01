@@ -8,8 +8,8 @@ jobs:
   agent-review:
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write # Explicitly allows commenting
-      contents: read       # Allows checking out code
+      pull-requests: write
+      contents: read
 
     steps:
       - name: Checkout Code
@@ -20,20 +20,37 @@ jobs:
       - name: Prepare and Send to A2A Agent
         id: a2a_call
         run: |
-          # Same logic as before
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          PR_URL="${{ github.event.pull_request.html_url }}"
-          git diff origin/${{ github.base_ref }} HEAD > pr_diff.txt
+          # 1. Get the diff
+          git fetch origin ${{ github.base_ref }}
+          git diff origin/${{ github.base_ref }}...HEAD > pr_diff.txt
 
-          jq -n --arg t "$PR_TITLE" --arg u "$PR_URL" --rawfile d pr_diff.txt \
-            '{"parts": [{"text": "Review PR: \($t)\nURL: \($u)\n\nDiff:\n\($d)"}]}' > payload.json
+          # 2. Build the exact JSON structure from your screenshot
+          # We add 'role', 'kind', and a 'messageId'
+          jq -n \
+            --arg title "${{ github.event.pull_request.title }}" \
+            --arg url "${{ github.event.pull_request.html_url }}" \
+            --rawfile diff pr_diff.txt \
+            --arg msgid "$(uuidgen)" \
+            '{
+              "role": "user",
+              "parts": [
+                {
+                  "kind": "text",
+                  "text": "Review this PR.\nTitle: \($title)\nURL: \($url)\n\nDiff:\n\($diff)"
+                }
+              ],
+              "messageId": $msgid
+            }' > payload.json
 
-          RESPONSE=$(curl -s -X POST "https://form-agent-890362666088.us-central1.run.app/a2a/app" \
-            -H "Content-Type: application/json" -d @payload.json)
+          # 3. POST to Agent
+          curl -s -X POST "https://form-agent-890362666088.us-central1.run.app/a2a/app" \
+            -H "Content-Type: application/json" \
+            -d @payload.json > response.json
 
-          AGENT_FEEDBACK=$(echo "$RESPONSE" | jq -r '.parts[0].text // "No feedback received."')
+          # 4. Extract the response (Looking for parts[0].text based on screenshot)
+          AGENT_FEEDBACK=$(jq -r '.parts[0].text // "Agent did not return text."' response.json)
           
-          # Multiline output handling
+          # 5. Save to GitHub Output
           echo "feedback<<EOF" >> $GITHUB_OUTPUT
           echo "$AGENT_FEEDBACK" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -41,7 +58,6 @@ jobs:
       - name: Post Agent Comment
         uses: mshick/add-pr-comment@v2
         with:
-          # Explicitly pass the token to ensure the action has rights
           repo-token: ${{ secrets.GITHUB_TOKEN }}
           message: |
             ##  AI Code Review
