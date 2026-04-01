@@ -1,0 +1,48 @@
+name: A2A Agent Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  agent-review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write # Explicitly allows commenting
+      contents: read       # Allows checking out code
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare and Send to A2A Agent
+        id: a2a_call
+        run: |
+          # Same logic as before
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          git diff origin/${{ github.base_ref }} HEAD > pr_diff.txt
+
+          jq -n --arg t "$PR_TITLE" --arg u "$PR_URL" --rawfile d pr_diff.txt \
+            '{"parts": [{"text": "Review PR: \($t)\nURL: \($u)\n\nDiff:\n\($d)"}]}' > payload.json
+
+          RESPONSE=$(curl -s -X POST "https://form-agent-890362666088.us-central1.run.app/a2a/app" \
+            -H "Content-Type: application/json" -d @payload.json)
+
+          AGENT_FEEDBACK=$(echo "$RESPONSE" | jq -r '.parts[0].text // "No feedback received."')
+          
+          # Multiline output handling
+          echo "feedback<<EOF" >> $GITHUB_OUTPUT
+          echo "$AGENT_FEEDBACK" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post Agent Comment
+        uses: mshick/add-pr-comment@v2
+        with:
+          # Explicitly pass the token to ensure the action has rights
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            ##  AI Code Review
+            ${{ steps.a2a_call.outputs.feedback }}
