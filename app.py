@@ -2,7 +2,7 @@
 import streamlit as st
 import requests
 import time
-
+#modifying the url to production one
 API_URL = "http://127.0.0.1:8000"  
 
 st.title("Document Processing and Address Extraction")
