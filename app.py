@@ -1,10 +1,9 @@
-#code
 
 import streamlit as st
 import requests
 import time
 
-API_URL = "http://127.0.0.1:8000"  # Update if running FastAPI on a different host
+API_URL = "http://127.0.0.1:8000"  
 
 st.title("Document Processing and Address Extraction")
 
