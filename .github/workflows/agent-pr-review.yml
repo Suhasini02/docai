@@ -49,14 +49,14 @@ jobs:
           import json, os, uuid, re
  
            # Extract Jira ID from description
-           pr_body = os.environ.get('PR_BODY') or ""
-           jira_match = re.search(r'([A-Z]+-\d+)', pr_body)
-           jira_id = jira_match.group(1) if jira_match else "None Provided"
+          pr_body = os.environ.get('PR_BODY') or ""
+          jira_match = re.search(r'([A-Z]+-\d+)', pr_body)
+          jira_id = jira_match.group(1) if jira_match else "None Provided"
 
           diff = json.loads(os.environ['DIFF_ESCAPED'])
 
           message_text = (
-            "Please review this pull request and provide feedback.\n\n"
+            f"Please review this pull request and provide feedback.\n\n"
             "## PR Details\n"
             "- **Repository**: " + os.environ['REPO'] + "\n"
             "- **PR Number**: #" + os.environ['PR_NUMBER'] + "\n"
@@ -72,7 +72,7 @@ jobs:
             "1. A summary of what this PR does\n"
             "2. Potential issues or concerns\n"
             "3. Suggestions for improvement\n"
-            "4. An overall assessment (Approve / Request Changes / Neutral)"
+            "4. An overall assessment (Approve / Request Changes / Neutral)\n"
 
             "### PART 2: Jira Compliance Check (New Addition)\n"
               f"The associated Jira Ticket is: **{jira_id}**\n"
