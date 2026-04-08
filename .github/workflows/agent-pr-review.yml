@@ -76,9 +76,9 @@ jobs:
 
             "### PART 2: Jira Compliance Check (New Addition)\n"
               f"The associated Jira Ticket is: **{jira_id}**\n"
-              "1. Based on the PR description and title, does this code satisfy the intent of the ticket?\n"
+              "1. check the complete repo code files , does this code satisfy the intent of the ticket?\n"
               "2. Are there any missing requirements or out-of-scope changes?\n"
-              "3. Provide a 'Compliance Verdict' (Compliant / Non-Compliant).\n\n"
+              "3. Provide a 'Compliance Verdict' (Compliant / Non-Compliant).Also provide the jira ticket discription fetched. \n\n"
           )
 
           payload = {
