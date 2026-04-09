@@ -46,12 +46,17 @@ jobs:
         run: |
           # Write Python script to a file to avoid heredoc shell-quoting issues
           cat > /tmp/build_payload.py << 'PYEOF'
-          import json, os, uuid
+          import json, os, uuid, re
+ 
+           # Extract Jira ID from description
+          pr_body = os.environ.get('PR_BODY') or ""
+          jira_match = re.search(r'([A-Z]+-\d+)', pr_body)
+          jira_id = jira_match.group(1) if jira_match else "None Provided"
 
           diff = json.loads(os.environ['DIFF_ESCAPED'])
 
           message_text = (
-            "Please review this pull request and provide feedback.\n\n"
+            f"Please review this pull request and provide feedback.\n\n"
             "## PR Details\n"
             "- **Repository**: " + os.environ['REPO'] + "\n"
             "- **PR Number**: #" + os.environ['PR_NUMBER'] + "\n"
@@ -62,11 +67,18 @@ jobs:
             + (os.environ.get('PR_BODY') or '_No description provided._') + "\n\n"
             "## Diff\n```diff\n"
             + diff[:6000] + "\n```\n\n"
-            "Please provide:\n"
+            "Please perform a dual-purpose review for this pull request.\n\n"
+           "### PART 1: General Code Review (Usual Flow)\n"
             "1. A summary of what this PR does\n"
             "2. Potential issues or concerns\n"
             "3. Suggestions for improvement\n"
-            "4. An overall assessment (Approve / Request Changes / Neutral)"
+            "4. An overall assessment (Approve / Request Changes / Neutral)\n"
+
+            "### PART 2: Jira Compliance Check (New Addition)\n"
+              f"The associated Jira Ticket is: **{jira_id}**\n"
+              "1. check the complete repo code files , does this code satisfy the intent of the ticket?\n"
+              "2. Are there any missing requirements or out-of-scope changes?\n"
+              "3. Provide a 'Compliance Verdict' (Compliant / Non-Compliant).Also provide the jira ticket discription fetched. \n\n"
           )
 
           payload = {

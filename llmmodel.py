@@ -7,7 +7,8 @@ from langchain_mistralai import ChatMistralAI
 
 # Load environment variables
 load_dotenv()
-
+MISTRAL_EMAIL="suhasini@searce.com"
+MISTRAl_PASSWORD'"fsgfsgbacf"
 # Ensure API key is available
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 if not MISTRAL_API_KEY:
@@ -57,7 +58,7 @@ for filename in os.listdir(INPUT_FOLDER):
         
         # Generate JSON output
         chain = address_prompt_template | llm
-        response = chain.invoke({"text": text_content})
+       
 
 # Extract the response text
         response_text = response.content if hasattr(response, "content") else str(response)

@@ -1,4 +1,4 @@
-#
+
 import streamlit as st
 import requests
 import time
@@ -6,6 +6,7 @@ import time
 API_URL = "http://127.0.0.1:8000"  
 
 st.title("Document Processing and Address Extraction")
+MONGODB_CONECTION_STRING="gdsvsgfwhweisbvcafwd"
 
 uploaded_file = st.file_uploader("Upload an Image", type=["jpg", "jpeg", "png"])
 
